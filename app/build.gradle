@@ -1,0 +1,71 @@
+apply plugin: 'com.android.application'
+
+// tinker & andresguard 混合使用
+//apply from: './andresguard.gradle'
+//apply from: './tinker-andresguard.gradle'
+
+// tinker & walle 混合使用
+apply from: './walle.gradle'
+apply from: './tinker-walle.gradle'
+
+
+android {
+
+    signingConfigs {
+        release {
+            keyAlias 'andaction'
+            keyPassword 'wuhaiyang'
+            storeFile file('hfkey.jks')
+            storePassword 'wuhaiyang'
+            v2SigningEnabled true
+        }
+    }
+
+    compileSdkVersion 26
+    defaultConfig {
+        applicationId "com.andaction.accesstinker"
+        minSdkVersion 15
+        targetSdkVersion 26
+        versionCode 1
+        versionName System.properties['versionName']
+        testInstrumentationRunner "android.support.test.runner.AndroidJUnitRunner"
+
+        javaCompileOptions {
+            annotationProcessorOptions {
+                includeCompileClasspath = true
+            }
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+    aaptOptions {
+        // 关闭aapt png 优化 -> 反之tinker在生成补丁文件的时候 将这些优化的图片打入补丁
+        cruncherEnabled = false
+    }
+    compileOptions {
+        targetCompatibility 1.8
+        sourceCompatibility 1.8
+    }
+}
+
+dependencies {
+    testImplementation 'junit:junit:4.12'
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation 'com.android.support:appcompat-v7:26.1.0'
+
+
+    compileOnly 'com.tencent.tinker:tinker-android-anno:1.9.2'
+    implementation 'com.tencent.tinker:tinker-android-lib:1.9.1'
+}
+
+android.applicationVariants.all { variant ->
+    variant.outputs.all {
+        outputFileName = "${project.name}-" + variant.buildType.name + "-" + variant.versionName + ".apk"
+    }
+}
+

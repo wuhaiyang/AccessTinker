@@ -1,0 +1,26 @@
+/*
+ * Copyright (c) 2017. danlu.com Co.Ltd. All rights reserved.
+ */
+
+
+if (buildWithWalle()) {
+    apply plugin: 'walle'
+
+    def date = new Date().format("yyyy-MM-dd")
+    walle {
+        // 指定渠道包的输出路径
+        apkOutputFolder = new File("${project.buildDir}/outputs/channels")
+        // 定制渠道包的APK的文件名称
+        apkFileNameFormat = '${appName}-${channel}-${buildType}-v${versionName}-' + date + '.apk'
+        // 渠道配置文件
+        channelFile = new File("${project.getProjectDir()}/channel")
+    }
+}
+
+
+def buildWithWalle() {
+    return enableWalle.toBoolean()
+}
+
+
+

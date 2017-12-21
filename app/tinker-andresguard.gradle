@@ -1,0 +1,299 @@
+/*
+ * Copyright (c) 2017. danlu.com Co.Ltd. All rights reserved.
+ */
+
+// author :wuhaiyang
+
+// 未接入walle 多渠道编包
+// 生成基准包
+// ./gradlew resguardRelease -PisNeedBackup=true
+
+//  生成补丁包
+// 保证${rootDir}/tinkerBackup/${versionNamePrefix}/ 目录存在基准先关文件
+// ./gradlew tinkerPatchRelease -PisNeedBackup=false
+
+// 修正版本前缀显示 形如v1.2.2
+def versionNamePrefix = "v${getVersionName()}"
+
+// 定义备份文件位置
+def bakPath = file("${rootDir}/tinkerBackup/${versionNamePrefix}")
+
+ext {
+    appName = "app"
+
+    def prefix = readPrefixContent(bakPath.absolutePath)
+
+    // 是否启用tinker
+    tinkerEnable = enableTinker.toBoolean()
+
+    // 基准apk路径
+    tinkerOldApkPath = "${bakPath}/${prefix}.apk"
+    // 基准apk mapping 文件
+    tinkerApplyMappingPath = "${bakPath}/${prefix}-mapping.txt"
+    // 基准apk R文件 -> excute assembleRelease 后，会在bak 目录下生成R文件
+    tinkerApplyResourcePath = "${bakPath}/${prefix}-R.txt"
+    // 指定多渠道包路径 生成对应渠道patch文件
+    tinkerBuildFlavorDirectory = "${bakPath}/"
+
+}
+
+if (buildWithTinker()) {
+    // 依赖插件
+    apply plugin: 'com.tencent.tinker.patch'
+
+    tinkerPatch {
+
+        //基准apk包的路径
+        oldApk = getOldApkPath()
+
+        // 是否忽略tinker patch 文件生成过程中一些警告，不忽略，开发者关注警告并修复，否则patch文件可能会有问题
+        ignoreWarning = false
+
+        // 是否签名
+        useSign = true
+
+        //是否打开tinker的功能
+        tinkerEnable = true
+
+        buildConfig {
+
+            // 指定旧的混淆mapping文件路径，用于减小apk体积大小
+            applyMapping = getApplyMappingPath()
+
+            // 指定旧的R.txt 资源ID 值 ，用于减小apk体积大小
+            applyResourceMapping = getApplyResourceMappingPath()
+
+            // 决定当前基准包运行在哪些基准包上面，一般指定versionName
+            tinkerId = getTinkerIdValue()
+
+            //补丁包是否根据基准包的类分布来编译 true-> 减少dex diff file size
+            // true 会编译不过 Error:Could not get unknown property 'apkVariantData' for object of type com.android.build.gradle.internal.api.ApplicationVariantImpl. 1.9.2  已经修复此问题
+            keepDexApply = true
+
+            //是否使用加固模式 这种模式仅仅可以用于加固应用中
+            isProtectedApp = false
+
+            // 是否支持新增非export的Activity
+            supportHotplugComponent = true
+        }
+
+        dex {
+            // raw or jar,minSdkVersion < 14 you must choose jar , 通常默认选择jar
+            dexMode = "jar"
+            //需要处理dex路径
+            pattern = ["classes*.dex",
+                       "assets/secondary-dex-?.jar"]
+            // 1.7.6 需要手动配置下 后续版本不需要配置
+//            loader = [
+//                    //use sample, let BaseBuildInfo unchangeable with tinker
+//                    "com.danlu.tinkerdemo.module.MyTinkerApplication"
+//            ]
+            // loader更多细节说明参考https://github.com/Tencent/tinker/wiki/Tinker-%E6%8E%A5%E5%85%A5%E6%8C%87%E5%8D%97
+        }
+
+        lib {
+            //需要处理lib路径
+            pattern = ["lib/*/*.so"]
+        }
+
+        res {
+            // 资源指定存放路径，不要将资源存放到其他路径，否则在合成新的apk的时候就会无法打包进去  其中r/* 为了配合andresguard 使用
+            pattern = ["res/*", "assets/*", "resources.arsc", "AndroidManifest.xml", "r/*"] //"r/*",
+
+            // 指定不受影响的资源路径 ,忽略那些资源修改 ,在编译时会忽略该文件的新增、删除与修改
+            ignoreChange = ["assets/sample_meta.txt"] //"*.png" 如果你确认png 并没有修改，忽略所有png修改
+
+            // 资源修改大小默认值。 100k,如果修改资源超过100k, tinker 就会采用自定义的bsdiff 算法来减小 patch体积，但是会增加合成时的复杂度
+            largeModSize = 1024
+        }
+
+        //说明本次patch文件的相关信息 package_meta.txt
+        packageConfig {
+            configField("patchMessage", "fix some bugs")
+            configField("patchVersion", "1.0.0")
+        }
+
+        //7zip路径配置项，执行前提是useSign为true
+        sevenZip {
+            zipArtifact = "com.tencent.mm:SevenZip:1.2.10"
+        }
+    }
+
+    def date = new Date().format("yyyy-MM-dd")
+    def versionName = getVersionName()
+
+    android.applicationVariants.all { variant ->
+        // flavorDebug || flavorRelease
+        def taskName = variant.name
+        // debug || release
+        def buildTypeName = variant.buildType.name
+
+        def ouputApkNamePrefix = "${project.name}-${buildTypeName}-${versionName}"
+        def andResOutputPrefix = "${variant.dirName}/AndResGuard_${ouputApkNamePrefix}"
+
+        def andResSuffix = "aligned_signed"
+
+        tasks.all {
+            // 当且仅仅执行XXXXRelease 任务的时候才 备份基准包 和 设置tinker先关属性
+            if (buildTypeName == 'release') {
+
+                if ("tinkerPatch${buildTypeName}".equalsIgnoreCase(it.name)) {
+                    // 将当前it任务（tinkerPatchRelease）指针临时存放到tempPointer
+                    def tempPointer = it
+                    def resguardTask
+                    tasks.all {
+                        if (it.name.equalsIgnoreCase("resguard${taskName.capitalize()}")) {
+                            resguardTask = it
+                            tempPointer.doFirst({
+                                // 指定tinkerPatch newApk路径 以生成补丁包
+                                it.buildApkPath = "${buildDir}/outputs/apk/${andResOutputPrefix}/${ouputApkNamePrefix}_${andResSuffix}.apk"
+                                // ..
+                            })
+//                            tempPointer.dependsOn tinkerPatchPrepare
+                            tempPointer.dependsOn resguardTask
+                        }
+                    }
+                    // 由于task.all方法遍历任务获取resguardTask时，始终会延迟it.dependsOn resguardTask 导致报null 故将代码块迁移到任务遍历中
+//                    it.doFirst({
+//                        // 指定tinkerPatch newApk路径
+//                        it.buildApkPath = "${buildDir}/outputs/apk/${andResOutputPrefix}/${ouputApkNamePrefix}_${andResSuffix}.apk"
+//                        // ..
+//                    })
+//                    it.dependsOn tinkerPatchPrepare
+////                    it.dependsOn tasks.getByName("resguard${taskName.capitalize()}")
+//                    if (null != resguardTask) {
+//                        it.dependsOn resguardTask
+//                    }
+                }
+
+                //1.执行resguardRelease
+                //2.步骤1产生的apk、resource_mapping.txt R.txt mapping.txt 备份到指定目录
+                if ("resguard${taskName}".equalsIgnoreCase(it.name)) {
+                    it.doLast {
+                        def isNeedBackup = project.hasProperty("isNeedBackup") ? project.getProperties().get("isNeedBackup") : "false"
+                        println("=========================== isNeedBackup = " + isNeedBackup)
+                        if (!Boolean.parseBoolean(isNeedBackup)) {
+                            return 0
+                        }
+                        File intoFileDir = file(bakPath.absolutePath)
+                        if (intoFileDir.exists()) {
+                            // 如果存在备份 删除
+                            println("============================= will delete history baseapk...")
+                            delete(intoFileDir)
+                        }
+                        println("=================================: start copy file to destination")
+                        def newPrefix = "${project.name}-${variant.baseName}-${versionName}-${date}"
+                        // 将newPrefix 文件内容写入到一个临时文件，方便后期生成补丁包：方便设置基准内容
+                        File prefixVersionFile = new File("${bakPath.absolutePath}/prefix.txt")
+                        if (!prefixVersionFile.parentFile.exists()) {
+                            prefixVersionFile.parentFile.mkdirs()
+                        }
+                        if (!prefixVersionFile.exists()) {
+                            prefixVersionFile.createNewFile()
+                        }
+                        prefixVersionFile.write(newPrefix)
+
+                        println("------------------------ = ${buildDir}/outputs/apk/${andResOutputPrefix}/${ouputApkNamePrefix}_${andResSuffix}.apk" )
+                        copy {
+                            from "${buildDir}/outputs/apk/${andResOutputPrefix}/${ouputApkNamePrefix}_${andResSuffix}.apk"
+                            into intoFileDir
+                            rename { String fileName ->
+                                try {
+                                    fileName.replace("${ouputApkNamePrefix}_${andResSuffix}.apk", "${newPrefix}.apk")
+                                } catch (Exception e) {
+                                    println("@@@@rename apk error")
+                                }
+                            }
+
+                            from "${buildDir}/intermediates/symbols/${variant.dirName}/R.txt"
+                            into intoFileDir
+                            rename { String fileName ->
+                                try {
+                                    fileName.replace("R.txt", "${newPrefix}-R.txt")
+                                } catch (Exception e) {
+                                    prinltn("@@@@ rename R.txt error")
+                                }
+                            }
+
+                            from "${buildDir}/outputs/mapping/${variant.dirName}/mapping.txt"
+                            into intoFileDir
+                            rename { String fileName ->
+                                try {
+                                    fileName.replace("mapping.txt", "${newPrefix}-mapping.txt")
+                                } catch (Exception e) {
+                                    println("@@@@ rename mapping.txt error")
+                                }
+                            }
+
+                            from "${buildDir}/outputs/apk/${andResOutputPrefix}/resource_mapping_${ouputApkNamePrefix}.txt"
+                            into intoFileDir
+                            rename { String fileName ->
+                                try {
+                                    fileName.replace("resource_mapping_${ouputApkNamePrefix}.txt", "${newPrefix}-resource_mapping.txt")
+                                } catch (Exception e) {
+                                    println("@@@@ rename resource_mapping.txt error")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+    }
+}
+
+task tinkerPatchPrepare << {
+    def prefix = readPrefixContent(bakPath.absolutePath)
+    if (null != prefix) {
+        // 如果存在备份  对全局变量赋值操作
+        project.tinkerPatch.oldApk = "${bakPath}/${prefix}.apk"
+        project.tinkerPatch.buildConfig.applyMapping = "${bakPath}/${prefix}-mapping.txt"
+        project.tinkerPatch.buildConfig.applyResourceMapping = "${bakPath}/${prefix}-resource_mapping.txt"
+    }
+}
+
+def readPrefixContent(String path) {
+    File intoFileDir = file(path)
+    if (intoFileDir.exists()) {
+        def prefix = null
+        File prefixFile = new File("${path}/prefix.txt")
+        if (prefixFile.exists()) {
+            prefix = prefixFile.getText()
+        }
+        return prefix
+    } else {
+        println("--------------------配置文件prefix.txt不存在，请检查------------------------")
+    }
+}
+
+def buildWithTinker() {
+    return ext.tinkerEnable
+}
+
+def getOldApkPath() {
+    return ext.tinkerOldApkPath
+}
+
+def getApplyMappingPath() {
+    return ext.tinkerApplyMappingPath
+}
+
+def getApplyResourceMappingPath() {
+    return ext.tinkerApplyResourcePath
+}
+
+def getTinkerBuildFlavorDirectory() {
+    return ext.tinkerBuildFlavorDirectory
+}
+
+def getTinkerIdValue() {
+    return getVersionName()
+}
+
+def getVersionName() {
+    return System.properties['versionName']
+}
+
+
+

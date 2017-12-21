@@ -1,0 +1,327 @@
+/*
+ * Copyright (c) 2017. danlu.com Co.Ltd. All rights reserved.
+ */
+
+// releas
+// 产出基准包
+// ./gradlew assembleReleaseChannels -PisNeedBackup=true --stacktrace
+
+// 产出补丁包
+// ./gradlew tinkerPatchRelease -PisNeedBackup=false --stacktrace
+
+// 修正版本前缀显示 形如v1.2.2
+def versionNamePrefix = "v${getVersionName()}"
+
+// 定义备份文件位置
+def bakPath = file("${rootDir}/tinkerBackup/${versionNamePrefix}")
+ext {
+    // 是否启用tinker
+    tinkerEnable = enableTinker.toBoolean()
+
+    def prefix = readPrefixContent(bakPath.absolutePath)
+    println('------------prefix = ' + prefix)
+    // 基准apk路径
+    tinkerOldApkPath = "${bakPath}/${prefix}.apk"
+    // 基准apk mapping 文件
+    tinkerApplyMappingPath = "${bakPath}/${prefix}-mapping.txt"
+    // 基准apk R文件 -> excute assembleRelease 后，会在bak 目录下生成R文件
+    tinkerApplyResourcePath = "${bakPath}/${prefix}-R.txt"
+    // 指定多渠道包路径 生成对应渠道patch文件
+    tinkerBuildFlavorDirectory = "${bakPath}/"
+
+}
+//project.afterEvaluate {
+//    // 解析完成(配置、语法等) 所有配置task依赖关系已经生成
+//    println('--------------------------------------------- afterEvaluate')
+//}
+
+if (buildWithTinker()) {
+    // 依赖插件
+    apply plugin: 'com.tencent.tinker.patch'
+
+    tinkerPatch {
+
+        //基准apk包的路径
+        oldApk = getOldApkPath()
+
+        // 是否忽略tinker patch 文件生成过程中一些警告，不忽略，开发者关注警告并修复，否则patch文件可能会有问题
+        ignoreWarning = false
+
+        // 是否签名
+        useSign = true
+
+        //是否打开tinker的功能
+        tinkerEnable = true
+
+        buildConfig {
+
+            // 指定旧的混淆mapping文件路径，用于减小apk体积大小
+            applyMapping = getApplyMappingPath()
+
+            // 指定旧的R.txt 资源ID 值 ，用于减小apk体积大小
+            applyResourceMapping = getApplyResourceMappingPath()
+
+            // 决定当前基准包运行在哪些基准包上面，一般指定versionName
+            tinkerId = getTinkerIdValue()
+
+            //补丁包是否根据基准包的类分布来编译 true-> 减少dex diff file size
+            // true 会编译不过 Error:Could not get unknown property 'apkVariantData' for object of type com.android.build.gradle.internal.api.ApplicationVariantImpl. 1.9.2  已经修复此问题
+            keepDexApply = true
+
+            //是否使用加固模式 这种模式仅仅可以用于加固应用中
+            isProtectedApp = false
+
+            // 是否支持新增非export的Activity
+            supportHotplugComponent = true
+        }
+
+        dex {
+            // raw or jar,minSdkVersion < 14 you must choose jar , 通常默认选择jar
+            dexMode = "jar"
+            //需要处理dex路径
+            pattern = ["classes*.dex",
+                       "assets/secondary-dex-?.jar"]
+            // 1.7.6 需要手动配置下 后续版本不需要配置
+//            loader = [
+//                    //use sample, let BaseBuildInfo unchangeable with tinker
+//                    "com.danlu.tinkerdemo.module.MyTinkerApplication"
+//            ]
+            // loader更多细节说明参考https://github.com/Tencent/tinker/wiki/Tinker-%E6%8E%A5%E5%85%A5%E6%8C%87%E5%8D%97
+        }
+
+        lib {
+            //需要处理lib路径
+            pattern = ["lib/*/*.so"]
+        }
+
+        res {
+            // 资源指定存放路径，不要将资源存放到其他路径，否则在合成新的apk的时候就会无法打包进去  其中r/* 为了配合andresguard 使用
+            pattern = ["res/*", "assets/*", "resources.arsc", "AndroidManifest.xml", "r/*"] //"r/*",
+
+            // 指定不受影响的资源路径 ,忽略那些资源修改 ,在编译时会忽略该文件的新增、删除与修改
+            ignoreChange = ["assets/sample_meta.txt"] //"*.png" 如果你确认png 并没有修改，忽略所有png修改
+
+            // 资源修改大小默认值。 100k,如果修改资源超过100k, tinker 就会采用自定义的bsdiff 算法来减小 patch体积，但是会增加合成时的复杂度
+            largeModSize = 1024
+        }
+
+        //说明本次patch文件的相关信息 package_meta.txt
+        packageConfig {
+            configField("patchMessage", "fix some bugs")
+            configField("patchVersion", "1.0.0")
+        }
+
+        //7zip路径配置项，执行前提是useSign为true
+        sevenZip {
+            zipArtifact = "com.tencent.mm:SevenZip:1.2.10"
+        }
+    }
+
+    // 多渠道
+
+    List<String> flavors = new ArrayList<>();
+    project.android.productFlavors.each { flavor ->
+        flavors.add(flavor.name)
+    }
+    boolean hasFlavors = flavors.size() > 0
+
+    def versionName = getVersionName()
+    def date = new Date().format("yyyy-MM-dd")
+
+    android.applicationVariants.all { variant ->
+        // flavorDebug || flavorRelease
+        def taskName = variant.name
+        // debug || release
+        def buildTypeName = variant.buildType.name
+
+        tasks.all {
+
+            // 生产展示
+            if (buildTypeName == 'release') {
+
+                def newPrefix = "${project.name}-${variant.baseName}-${versionName}-${date}"
+
+                if ("tinkerPatch${buildTypeName}".equalsIgnoreCase(it.name)) {
+                    // 1. 先执行assembleReleaseChannels
+                    // 2. 将基准文件设置给tinker
+                    // 3. 执行tinkerPatchRelease
+                    def tempPointer = it
+                    def assembleWalleTask
+                    tasks.all {
+                        if (it.name.equalsIgnoreCase("assemble${buildTypeName}Channels")) {
+                            assembleWalleTask = it
+                            tempPointer.doFirst({
+                                // 指定tinkerPatch newApk路径 以生成补丁包
+                                def channes = project.hasProperty("channelList") ? project.getProperties().get("channelList") : "Market360"
+                                // 将美团打出的Danlu渠道包作为baseapk
+                                def defaultChannelsPrefix = "${project.name}-${channes}-${buildTypeName}-v${versionName}-${date}"
+                                it.buildApkPath = "${buildDir}/outputs/channels/${defaultChannelsPrefix}.apk"
+                                // ..
+
+                            })
+//                            tempPointer.dependsOn tinkerPatchPrepare
+                            tempPointer.dependsOn assembleWalleTask
+                        }
+                    }
+                }
+
+                if ("assemble${buildTypeName}Channels".equalsIgnoreCase(it.name)) {
+                    it.doLast {
+                        def isNeedBackup = project.hasProperty("isNeedBackup") ? project.getProperties().get("isNeedBackup") : "false"
+                        if (!Boolean.parseBoolean(isNeedBackup)) {
+                            return 0
+                        }
+
+                        File intoFileDir = file(bakPath.absolutePath)
+                        if (intoFileDir.exists()) {
+                            // 如果存在备份 删除
+                            println("============================= will delete history baseapk...")
+                            delete(intoFileDir)
+                        }
+
+                        // 将newPrefix 文件内容写入到一个临时文件，方便后期生成补丁包：方便设置基准内容
+                        File prefixVersionFile = new File("${bakPath.absolutePath}/prefix.txt")
+                        if (!prefixVersionFile.parentFile.exists()) {
+                            prefixVersionFile.parentFile.mkdirs()
+                        }
+                        if (!prefixVersionFile.exists()) {
+                            prefixVersionFile.createNewFile()
+                        }
+                        prefixVersionFile.write(newPrefix)
+
+                        project.copy {
+                            def channes = project.hasProperty("channelList") ? project.getProperties().get("channelList") : "Market360"
+                            // 将美团打出的Danlu渠道包作为baseapk
+                            def defaultChannelsPrefix = "${project.name}-${channes}-${buildTypeName}-v${versionName}-${date}"
+
+                            println('-------------- = ' + defaultChannelsPrefix)
+
+                            from "${buildDir}/outputs/channels/${defaultChannelsPrefix}.apk"
+                            into bakPath
+                            rename { String fileName ->
+                                fileName.replace("${defaultChannelsPrefix}.apk", "${newPrefix}.apk")
+                            }
+
+                            from "${buildDir}/outputs/mapping/${variant.dirName}/mapping.txt"
+                            into bakPath
+                            rename { String fileName ->
+                                fileName.replace("mapping.txt", "${newPrefix}-mapping.txt")
+                            }
+
+                            from "${buildDir}/intermediates/symbols/${variant.dirName}/R.txt"
+                            into bakPath
+                            rename { String fileName ->
+                                fileName.replace("R.txt", "${newPrefix}-R.txt")
+                            }
+
+                        }
+                    }
+                }
+            }
+
+            // 效果展示（方便）
+            // 基准包 ./gradlew assembleDebug -PisNeedBackup=true --stacktrace (请提前删除${buildDir}/outputs 以及 tinkerBackup 目录下的文件)
+            // 补丁包 ./gradlew tinkerPatchDebug -PisNeedBackup=false --stacktrace (请提前删除${buildDir}/outputs/目录下的文件)
+            /*if ("assemble${taskName.capitalize()}".equalsIgnoreCase(it.name)) {
+
+                // 将基准包的一些apk mapping R 文件拷贝到bakapk目录下作为基准包相关内容
+                it.doLast {
+                    def isNeedBackup = project.hasProperty("isNeedBackup") ? project.getProperties().get("isNeedBackup") : "false"
+                    println("=========================== isNeedBackup = " + isNeedBackup)
+                    if (!Boolean.parseBoolean(isNeedBackup)) {
+                        return 0
+                    }
+                    copy {
+                        def fileNamePrefix = "${project.name}-${variant.baseName}"
+                        def newFileNamePrefix = hasFlavors ? "${fileNamePrefix}" : "${fileNamePrefix}-${date}"
+
+                        def destPath = hasFlavors ? file("${bakPath}/${project.name}-${date}/${variant.flavorName}") : bakPath
+                        from variant.outputs.first().outputFile
+                        into destPath
+                        rename { String fileName ->
+                            fileName.replace("${fileNamePrefix}.apk", "${newFileNamePrefix}.apk")
+                        }
+
+                        from "${buildDir}/outputs/mapping/${variant.dirName}/mapping.txt"
+                        into destPath
+                        rename { String fileName ->
+                            fileName.replace("mapping.txt", "${newFileNamePrefix}-mappingweh.txt")
+                        }
+
+                        from "${buildDir}/intermediates/symbols/${variant.dirName}/R.txt"
+                        into destPath
+                        rename { String fileName ->
+                            fileName.replace("R.txt", "${newFileNamePrefix}-R.txt")
+                        }
+                    }
+                }
+            }*/
+        }
+    }
+
+
+    task tinkerPatchPrepare << {
+        def prefix = readPrefixContent(bakPath.absolutePath)
+        if (null != prefix) {
+            // 如果存在备份  对全局变量赋值操作
+//                project.tinkerPatch.newApk = ""
+            project.tinkerPatch.oldApk = "${bakPath}/${prefix}.apk"
+            // 以下两个属性变量设置无效，原因是tinker-plugin内部源码实现 是在project.afterEvaluate action 中 获取的tinkerPatch.applyMapping的值，此时在进行设置已经无效
+            project.extensions.tinkerPatch.buildConfig.applyMapping = "${bakPath}/${prefix}-mapping.txt"
+            project.extensions.tinkerPatch.buildConfig.applyResourceMapping = "${bakPath}/${prefix}-R.txt"
+        }
+    }
+
+}
+
+def readPrefixContent(String path) {
+    File intoFileDir = file(path)
+    if (intoFileDir.exists()) {
+        def prefix = null
+        File prefixFile = new File("${path}/prefix.txt")
+        if (prefixFile.exists()) {
+            prefix = prefixFile.getText()
+        }
+        return prefix
+    } else {
+        println("--------------------配置文件prefix.txt不存在，请检查------------------------")
+    }
+}
+
+
+def buildWithTinker() {
+    return ext.tinkerEnable
+}
+
+def getOldApkPath() {
+    return ext.tinkerOldApkPath
+}
+
+def getApplyMappingPath() {
+    return ext.tinkerApplyMappingPath
+}
+
+def getApplyResourceMappingPath() {
+    return ext.tinkerApplyResourcePath
+}
+
+def getTinkerBuildFlavorDirectory() {
+    return ext.tinkerBuildFlavorDirectory
+}
+
+def getTinkerIdValue() {
+    return getVersionName()
+}
+
+def getVersionName() {
+    def versionName = System.properties['cus_version_name']
+    if (null == versionName || "".equals(versionName)) {
+        // Jenkins用户未设置，使用默认的versionName
+        versionName = System.properties['versionName']
+    }
+    println('-----------' + versionName + '-----------')
+    return versionName
+}
+
+
+

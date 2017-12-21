@@ -1,0 +1,52 @@
+/*
+ * Copyright (c) 2017. danlu.com Co.Ltd. All rights reserved.
+ */
+
+
+def buildWithAndResGuard() {
+    return enableAndResGuard.toBoolean()
+}
+
+if (buildWithAndResGuard()) {
+    apply plugin: 'AndResGuard'
+    andResGuard {
+        //如果想keep住资源原有的物理路径 请指定resource_mapping.txt文件
+//    mappingFile = file("./resource_mapping.txt")
+        mappingFile = null
+        // 由于V2签名会导致7z压缩失效 故关闭此选项 1.2.10 已经支持v2q签名
+        use7zip = true
+        useSign = true
+        keepRoot = false
+
+        // add <yourpackagename>.R.drawable.icon into whitelist.
+        // because the launcher will get the icon with his name
+        whiteList = [
+                // icon
+                "R.mipmap.ic_launcher",
+
+                // growingio
+        ]
+
+        compressFilePattern = [
+                "*.png",
+                "*.jpg",
+                "*.jpeg",
+                "*.gif",
+                "resources.arsc"
+        ]
+        sevenzip {
+            artifact = 'com.tencent.mm:SevenZip:1.2.10'
+        }
+        /* 可选： 如果不设置则会默认覆盖assemble输出的apk
+         **/
+//        finalApkBackupPath = "${project.rootDir}/final.apk"
+
+        /**
+         * 可选: 指定v1签名时生成jar文件的摘要算法
+         * 默认值为“SHA1”
+         **/
+//        digestalg = "SHA256"
+    }
+}
+
+
